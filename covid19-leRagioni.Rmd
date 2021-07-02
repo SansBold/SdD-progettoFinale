@@ -1,0 +1,507 @@
+---
+title: 'COVID-19: le ragioni della pandemia'
+author: "di Stefano Bosoppi"
+output:
+  html_document: 
+    css: ./style.css
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    df_print: paged
+    theme: simplex
+editor_options:
+  chunk_output_type: inline
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, out.width = "75%", fig.align = "center", 
+                      dev = "svg")
+```
+
+## 0: Preparazione all'analisi
+
+Prima di iniziare con lo studio vero e proprio delle ragioni che hanno contribuito a rendere SARS-CoV-2 (da qui in poi *COVID-19*) una pandemia che ha paralizzato il mondo intero per più di un anno, è necessario specificare quali sono gli strumenti e le materie prime qui utilizzate.
+
+### 0.0: Prefazione tecnica
+
+Le librerie utilizzate per svolgere questa analisi sono [`tidyverse`](https://www.tidyverse.org/packages/), [`corrplot`](https://cran.r-project.org/web/packages/corrplot/vignettes/corrplot-intro.html) e, solamente per alcune operazioni di cosmesi, [`tufte`](https://rstudio.github.io/tufte/).
+
+```{r librerie}
+library(tidyverse)
+library(corrplot)
+library(tufte)
+```
+
+Nel corso dello studio sarà indispensabile l'utilizzo delle funzioni di riportate nel chunk di codice che segue.
+
+```{r funzioni}
+countryPlot = function(s) {      # s: Stringa (nome di variabile) 
+  covidCountries %>%
+  filter(!!as.name(s) > 0) %>%
+  mutate(perc = !!as.name(s) * 100 / population) %>%
+  ggplot(aes(date, perc)) +
+    geom_line(aes(group = country), alpha = 1/3) +
+    geom_smooth(color = "red", se = FALSE) +
+    facet_wrap(~continent) +
+    # Cosmesi
+    theme_classic()
+}
+
+outlierPlot = function(s){        # s: Stringa (nome di variabile) 
+  covidOutliers %>%
+  ggplot(aes(reorder(continent, -!!as.name(s)), !!as.name(s))) +
+    geom_boxplot() +
+    theme_classic()
+}
+
+outliers = function( s, c, n ){   # s: Stringa (nome di variabile), c: Stringa (nome di continente), n: intero
+  covidOutliers %>%
+    select(c("continent", "country", s)) %>%
+    filter(continent == c) %>%
+    arrange(desc(!!as.name(s))) %>%
+    select(continent, country) %>%
+    head(n)
+}
+```
+
+### 0.1: Costruzione delle fondamenta
+
+I [dataset](https://github.com/owid/covid-19-data/tree/master/public/data) utilizzati per questa analisi sono stati scaricati da [Our World in Data](https://ourworldindata.org/coronavirus).
+
+```{r dataset}
+# Caricamento dei dataset 
+covidGeneral = read.csv("./datasets/covid-data.csv")
+covidContainment = read.csv("./datasets/covid-containment-index.csv")
+```
+
+Tuttavia, questi set di dati non sono "puliti", cioè non sono ancora pronti per fare un'analisi su di loro, ma hanno comunque le potenzialità per esserlo. Perciò, la prima cosa da fare è rendere effettiva questa loro espressività.
+
+```{r pulizia dei dati}
+# Si eimino la variabile tests_units e tests_per_case da covidGeneral perché non rilevanti ai fini dell'analisi
+nTU = match("tests_units",names(covidGeneral))
+nTPC = match("tests_per_case",names(covidGeneral))
+covidGeneral = covidGeneral[, -nTU]
+covidGeneral = covidGeneral[, -nTPC]
+
+# Si specifica che le colonne date e day contengono date
+covidGeneral$date = parse_date(covidGeneral$date, format = "%Y-%m-%d")
+covidContainment$Day = parse_date(covidContainment$Day, format = "%Y-%m-%d")
+
+# Si rendono i due tibble confrontabili: vengono rinominate le variabili che contengono le stesse informazioni 
+# (il paese ed il suo codice ISO) e viene creata una chiave surrogata che identifica ogni osservazione in base al
+# paese e da quanti giorni dal 01-01-2020 sono passati
+covidGeneral = 
+  covidGeneral %>%
+    mutate(id = paste(iso_code, as.character(covidGeneral$date - as.Date("2020-01-01", format = "%Y-%m-%d")), 
+                      sep = "-")) %>%
+    relocate(id, .before = iso_code) %>%
+    rename(country = location, code = iso_code)
+
+covidContainment = 
+  covidContainment %>%
+    mutate(id = paste(Code, as.character(covidContainment$Day - as.Date("2020-01-01", format = "%Y-%m-%d")), 
+                      sep = "-")) %>%
+    relocate(id, .before = Entity) %>%
+    rename(date = Day, country = Entity, code = Code)
+
+
+# I due tibble vengnon uniti con un left join perché i dati di covidContainment sono rilevanti solamente se
+# accompagnati da quelli di covidGeneral.
+covidFull = left_join(covidGeneral, covidContainment)
+
+# Si filtrano i paesi che hanno numero totale di contagiati positivo, vengono eliminati i dati riassuntivi sul
+# mondo ed i suoi continenti per evitare di trascinare dati sicuramente non utili a questa analisi. 
+# Si sostituiscono poi i NA con 0.
+# In aggiunta esplorando il dataset si nota che ci sono valori negativi per i nuovi casi, le nuove morti e le
+# nuove vaccinazioni: probabilmente questo è dovuto ad un errore dei costruttori del dataset, si applica quindi
+# il valore assoluto a tali valori.
+
+# Valori di nuovi casi negativi (esempio a titolo informativo per corroborare quanto detto sopra)
+# filter(covidFull, new_cases < 0)
+
+covidFull =
+  covidFull %>%
+    filter(total_cases > 0 & !str_detect(covidFull$id, "^OWID")) %>%
+    replace(is.na(.), 0) %>%
+    mutate_at(c("new_cases", "new_deaths", "new_vaccinations"), funs(abs(.)))
+
+covidFull
+```
+
+## 1: Uno sguardo d'insieme
+
+Ora che si ha a disposizione un dataset pronto ad essere utilizzato, si può iniziare ad estrarre da questo agglomerato di dati una prima ombra di informazione.
+
+### 1.1: Le prime osservazioni
+
+Per farsi un'idea su come le nazioni del mondo sono state colpite e su come hanno reagito alla pandemia, si possono visualizzare gli andamenti della percentuale totale di casi, di morti e di vaccini, suddividendo in base al loro continente.\
+Per far ciò si è ricorsi ad una rappresentazione delle variabili (casi totali, morti totali, vaccinazioni totali) in valore relativo (percentuale) e non assoluto (numero di persone) in modo da rendere la situazione epidemiologica dei vari paesi confrontabile. Il principio utilizzato è stato:
+$$
+  V_P =\frac{V_A}{Pop} \cdot 100
+$$
+Dove $V_P$ è il valore relativo (percentuale) della variabile per un paese, $V_A$ il suo valore assoluto e $Pop$ è l'ultimo dato rilevato per la popolazione di tale nazione.\
+In aggiunta, si visualizza anche l'andamento generale di ogni variabile nei vari continenti (in rosso).
+
+#### Grafici sull'andamento: {.tabset .tabset-fade}
+
+```{r primi grafici, echo = FALSE}
+covidCountries =
+  covidFull %>%
+  select(c("continent", "country", "date", "total_cases", "total_deaths", "total_vaccinations", "population"))
+```
+
+##### Dei contagi
+
+```{r grafico contagi}
+# Grafico dei contagi
+countryPlot("total_cases") +
+  labs(x = "Data", y = "Contagi totali (%)")
+```
+
+##### Delle morti
+
+```{r grafico morti}
+# Grafico delle morti
+countryPlot("total_deaths") +
+  labs(x = "Data", y = "Morti totali (%)")
+```
+
+##### Delle vaccinazioni
+
+```{r grafico vaccinazioni}
+# Grafico delle vaccinazioni
+countryPlot("total_vaccinations") +
+  labs(x = "Data", y = "Vaccinazioni totali (%)")
+```
+
+####
+
+Da questi tre grafici si possono subito trarre quattro importanti osservazioni:
+
+* ci sono continenti più colpiti/vaccinati e altri meno;
+* l'andamento generale delle curve di contagi/morti/vaccinazioni è diverso per ogni continente;
+* la pandemia ha colpito al massimo poco più del 15% della popolazione dei paesi da essa toccati;
+* alcuni paesi dell'Asia e dell'Africa hanno vaccinato più della totalità della popolazione.
+
+Prima di discutere in maggior dettaglio i primi tre punti, è opportuno chiarire l'anomalia alzata dalla quarta osservazione. I valori superiori al 100% della popolazione possono essere giustificati in due modi: o il paese ha avuto una forte crescita demografica dall'ultimo calcolo della popolazione, oppure, siccome molti dei vaccini per essere efficaci hanno avuto bisogno di essere somministrati in due dosi, alcune persone risultano "vaccinate" due volte.
+
+Proviamo ad escludere o confermare una di queste possibilità sfruttando il fatto che il dataset a nostra disposizione può dirci quante persone sono state completamente vaccinate. Si selezionano quindi i due continenti "incriminati", l'Africa e l'Asia.
+
+```{r chiarimento anomalia}
+covidFull %>%
+  select(c("continent", "country", "date", "total_vaccinations", "people_fully_vaccinated", "population")) %>%
+  mutate(perc = people_fully_vaccinated * 100 / population,
+         perc = round(perc, digits = 1),
+         total_vaccinations = total_vaccinations * 100 / population) %>%
+  group_by(continent, country) %>%
+  summarize_at(c("perc", "total_vaccinations"), max) %>%
+  filter(total_vaccinations >= 100) %>%
+  ggplot(aes(country, perc)) +
+    geom_bar(stat = "identity", aes(fill = continent)) +
+    geom_text(aes(label=perc), vjust=-0.3, size=3.5) +
+    # Cosmesi
+    theme_classic() +
+    labs(x = "Paese", y = "Persone completamente vaccinate (%)") +
+    scale_fill_manual(values = c("#A62E38", "#252526"))
+```
+
+Da questi due grafici si può chiaramente capire che quei valori superiori al 100% della popolazione erano dati dal fatto che erano state contate più volte le persone che hanno ricevuto più di una dose.
+
+### 1.2: Le eccezioni
+
+Risolto questo problema, si può iniziare ad approfondire la situazione della pandemia e della campagna vaccinale osservando quanti e quali sono i paesi che più si discostano dalla media continentale.\
+Si vogliono quindi scoprire gli "outlier" di questi trend: il modo migliore per farlo è calcolare la media di ogni variabile (totale dei casi, delle morti e delle vaccinazioni) per ogni paese ed osservare dove si posiziona tale media rispetto a quella del proprio continente.
+
+Anche qui i valori calcolati sono in percentuale per favorire il confronto dell'impatto del fenomeno sulla nazione e come funzione riassuntiva è stata scelta la media in modo da poter considerare anche il peso (più o meno significativo) che hanno avuto i momenti di picco o depressione sulla curva.
+
+```{r outlier}
+covidOutliers =
+  covidCountries %>%
+  group_by(continent, country, population) %>%
+  summarise_at(c("total_cases", "total_deaths", "total_vaccinations"), max) %>%
+  filter_at(vars(c("total_cases", "total_deaths", "total_vaccinations")), all_vars(.>0)) %>%
+  mutate(total_cases = total_cases * 100 / population,
+         total_deaths = total_deaths * 100 / population,
+         total_vaccinations = total_vaccinations * 100 / population)
+```
+
+#### Visualizzazione degli outlier: {.tabset .tabset-fade}
+
+##### Per i contagi
+```{r outlier contagi}
+outlierPlot("total_cases") +
+  labs(x = "Continente", y = "Contagi totali (%)")
+```
+
+##### Per le morti
+```{r outlier morti}
+outlierPlot("total_deaths") +
+  labs(x = "Continente", y = "Morti totali (%)")
+```
+
+##### Per le vaccinazioni
+```{r outlier vaccinazioni}
+outlierPlot("total_vaccinations") +
+  labs(x = "Continente", y = "Vaccinazioni totali (%)")
+```
+
+####
+
+Nonostante questi tre grafici siano già molto elequenti di per sé, è necessario chiarire due punti fondamentali: il primo è che è molto evidente la diversa intensità della pandemia e della campagna vaccinale nei continenti, con comunque la presenza di paesi che si discostano, anche notevolmente, da tali medie; il secondo è che mentre per i contagi e le morti c'è stata una minima uniformità all'interno dei continenti, per la campagna vaccinale sembrano esserci più differenze, date probabilmente dal fatto che molti paesi hanno pensato prima ai propri interessi invece di cercare una sorta di collaborazione tra di loro.
+
+Scostamenti particolarmente bassi da notare, per quanto riguarda la campagna vaccinale, sono quelli per l'Oceania e per il Nord America (dovuto probabilmente al basso numero di nazioni che li compongono).
+
+Ha quindi senso chiedersi quali paesi sono al di fuori del trend solamente per quelle variabili dove esiste un trend, ossia per i contagi e per le morti.
+
+#### I paesi fuori dai trend: {.tabset .tabset-fade}
+
+##### Per i contagi
+```{r paesi outlier contagi}
+full_join( outliers("total_cases", "Europe", 4), outliers("total_cases", "Africa", 3) ) %>%
+  full_join(outliers("total_cases", "North America", 2))
+```
+
+##### Per le morti
+```{r paesi outlier morti}
+# ... per le morti
+full_join(outliers("total_deaths", "North America", 3), outliers("total_deaths", "Asia", 2)) %>%
+  full_join(outliers("total_deaths", "Africa", 3))
+```
+
+####
+
+Escludendo i paesi con scarsa estensione territoriale, particolari outlier da notare sono: 
+
+```{r echo=FALSE}
+df = data.frame(Contagi = c("Montenegro", "Repubblica Ceca", "Sud Africa", "Stati Uniti", ""), 
+                Morti = c("Stati Uniti", "Messico", "Armenia", "Sud Africa", "Tunisia")) %>%
+     rename(c("Per i contagi" = "Contagi", "Per le morti" = "Morti"))
+
+knitr::kable(df, format = "html")
+```
+
+Tuttavia, ciò che ci interessa veramente sapere è a cosa sono dovuti questi sfasamenti: perché ci sono paesi in cui COVID-19 ha colpito più intensamente ed altri in cui invece ha avuto un impatto più leggero? Quali sono i motivi che hanno provocato una maggiore/minore mortalità in alcuni paesi? Cosa ha influenzato e continua ad influenzare la quantità di vaccinati in un paese?
+
+## 2: Muri e ponti
+
+Ciò che quindi si vuole andare a trovare sono le ragioni che hanno provocato una maggiore aumento dei nuovi casi, delle nuove morti e delle nuove vaccinazioni (ponti), ma anche quali fenomeni hanno ostacolato la crescita dei valori di queste variabili (muri).
+
+### 2.1: Le variabili rilevanti
+
+Per rispondere, anche se sarebbe più preciso dire _per trovare le ipotesi più plausibili_, alle domande poste alla fine della sezione 1.2 sarà indispensabile utilizzare una discreta quantità di variabili (oltre a quelle già in studio), che d'ora in poi chiameremo *variabili rilevanti*.\
+Queste sono, per ogni paese (`country`) di ogni continente (`continent`): 
+
+* il numero di abitanti (`population`);
+* l'età media (`median_age`);
+* la densità di popolazione (`population_density`); 
+* la percentuale di over 65 e quella di over 70 (`aged_65_older` e `aged_70_older`);
+* il prodotto interno lordo pro capite (`gdp_per_capita`);
+* la percentuale di abitanti che vivono in condizioni di estrema povertà (`extreme_poverty`);
+* il tasso di morti legati a patologie cardiovascolari (`cardiovasc_death_rate`);
+* la percentuale di affetti da diabete (`diabetes_prevalence`);
+* la percentuale di donne e uomini fumatori (`female_smokers` e `male_smokers`);
+* il numero di letti di ospedale per milione di abitanti (`hospital_beds_per_thousand`);
+* l'aspettativa di vita (`life_expectancy`);
+* l'indice di sviluppo umano (`human_development_index`);
+* l'indice di contenimento (`containment_index`).
+
+```{r variabili rilevanti}
+relevantVars = c("new_cases", "new_deaths", "new_vaccinations", "continent", "country", "population",
+                 "population_density", "median_age", "aged_65_older","aged_70_older", "gdp_per_capita",
+                 "extreme_poverty", "cardiovasc_death_rate", "diabetes_prevalence", "female_smokers",
+                 "male_smokers", "hospital_beds_per_thousand", "life_expectancy", "human_development_index",
+                 "containment_index")
+```
+
+```{r traduzione per cosmetica, echo = FALSE}
+translate = c("nuovi casi", "nuove morti", "nuove vaccinazioni", "continente", "paese", "popolazione", 
+              "densità abitativa", "età media", "over 65", "over 70", "PIL p.c.", "povertà estrema",
+              "tasso morti cardiovascolari", "prevalenza diabete", "fumatrici", "fumatori", "posti letto",
+              "aspettativa di vita", "indice sviluppo umano", "indice contenimento")
+```
+
+
+Per maggiori dettagli sul significato e/o su come sono state misurati questi dati si consiglia di consultare la [sezione dedicata](https://github.com/owid/covid-19-data/blob/master/public/data/owid-covid-codebook.csv) della repository di GitHub creata da Our World in Data. I dettagli sull'indice di contenimento possono essere trovati direttamente nell'[apposita sezione](https://ourworldindata.org/covid-stringency-index) del sito web della medesima organizzazione.
+
+### 2.2: Cercando correlazoni
+
+Definite le variabili rilevanti per lo studio si può prima cercare correlazioni tra di esse e poi vedere in particolare come queste influenzano i nuovi casi, le nuove morti e le nuove vaccinazioni.\
+Il modo in cui si decide di procedere è quello di creare una tabella che riassume, per ogni nazione, i valori assunti da ciascuna delle variabili precedentemente citate. La funzione più adeguata per far questo è la media, in quanto questa inevitabilmente considera anche il numero di volte in cui una data variabile assume un determinato valore.
+
+Oltre a questa tabella, verrà mostrato un grafico riassuntivo delle correlazioni: prendendo infatti le varie varaibili a due a due, si disegnerà un'ellisse tale che la sua pendenza, ascendente o discendente, rappresenta il tipo di correlazione, rispettivamente positiva o negativa, ed il suo spessore rappresenta l'intensità di questa correlazione, all'aumentare del valore assoluto di quest'ultima la larghezza dell'ellisse diminuisce.
+
+Un ulteriore dettaglio importante da evidenziare è che per le correlazioni verranno utilizzati i [coefficienti di correlazione per rango di Spearman](https://en.wikipedia.org/wiki/Spearman%27s_rank_correlation_coefficient) in quanto le relazioni che si andranno a studiare non sono lineari e, come si è già visto soprattutto per le vaccinazioni, non bisogna dare un peso eccessivo agli outlier.
+
+```{r scala cromatica, echo = FALSE}
+# Scala cromatica personalizzata
+colors = colorRampPalette(c("#6E1B09", "#D22C2C", "#F07249", "#F07249", "#393A3C"))
+```
+
+
+```{r correlazioni generali}
+# Si costruisce un tibble che riassume in base al paese le variabili rilevanti, facendo la media dei nuovi casi 
+# e dell'indice di contenimento. Si trasformano poi i nuovi casi in valori relativi per poterli rendere
+# confrontabili
+covidCors = 
+  covidFull %>%
+  select(all_of(relevantVars)) %>%
+  group_by_at(setdiff(relevantVars, 
+                      c("new_cases", "new_deaths", "new_vaccinations", "containment_index")
+                      )) %>%
+  summarize_at(c("new_cases", "new_deaths", "new_vaccinations", "containment_index"), mean) %>%
+  mutate(new_cases = new_cases / population, 
+         new_deaths = new_deaths / population, 
+         new_vaccinations = new_vaccinations / population,
+         hospital_beds_per_thousand = hospital_beds_per_thousand * 10) %>%
+  filter_at(
+    vars(setdiff(relevantVars, 
+                 c("continent", "country", "population", "new_cases", "new_deaths", "new_vaccinations"))),
+    all_vars(.>0)) %>%
+    rename(c("casi" = "new_cases", "morti" = "new_deaths", "vaccinazioni" = "new_vaccinations",
+             "densità ab." = "population_density", "età media" = "median_age", 
+             "over 65" = "aged_65_older", "over 70" = "aged_70_older", "PIL p.c." = "gdp_per_capita",
+             "povertà" = "extreme_poverty", "morti cardiovasc." = "cardiovasc_death_rate",
+             "diabete" = "diabetes_prevalence", "fumatrici" = "female_smokers", "fumatori" = "male_smokers",
+             "letti" = "hospital_beds_per_thousand","aspettativa vita" = "life_expectancy",
+             "I.S.U." = "human_development_index", "contenimento" = "containment_index"))
+
+# Si determinano i coefficienti di Spearman
+corGeneral = 
+  covidCors[, 4:ncol(covidCors)] %>%
+  cor(method = "spearman")
+
+# Dimostrazione che la maggioranza delle relazioni non è lineare (eseguire se ci si vuole convincere di ciò)
+# pairs(corGeneral)
+
+# Grafico delle correlazioni
+par(xpd = TRUE)
+corrplot(corGeneral, method="ellipse", type = "lower", order = "FPC",
+         tl.col = "black", tl.srt = 45, mar = c(0, 0, 2, 0), col = colors(100))
+```
+
+Osservando questo grafico si possono estrapolare numerose informazioni su come le diverse variabili sono tra loro correlate. Ciò che però si vuole particolarmente evidenziare è come la variabile *età media* riassuma in maniera molto efficace le variabili *percentuale di over 65* e *percentuale di over 70* e, analogamente, come l'*indice di sviluppo umano* sia fortemente connesso all'*aspettativa di vita* e al *reddito pro capite*.
+
+Altre importanti correlazioni da tenere a mente per le future considerazioni sono: il fatto che il *tasso di morti per malattie cardiovascolari* è in una correlazione particolarmente negativa con l'*aspettativa di vita* (e quindi per quanto detto sopra anche all'*indice di sviluppo umano*); l'assenza di una forte correlazione tra la *percentuale di affetti da diabete* e, contemporaneamente, l'*età media* e l'*indice di sviluppo umano*.
+
+Tuttavia l'obiettivo ultimo di questa sezione è trovare, se ci sono, correlazioni relative alle variabili *nuovi casi*, *nuove morti* e *nuove vaccinazioni*. Ciò che bisogna fare è quindi isolare le righe d'interesse e studiare i risultati che queste mostrano.\
+In questo nuovo grafico di correlazioni, siccome sarà importante stabilire in maniera sufficientemente precisa quanto un determinato fattore ha inciso sull'andamento di una variabile, verranno mostrati (in forma di percentuale) gli indici di correlazione calcolati, in modo da facilitare il confronto tra le varie osservazioni e quindi stabilire ciò che ha maggiormente influenzata una data variabile. 
+
+```{r correlazioni interessanti}
+# Si isolano le righe contenenti le correlazioni d'interesse
+corZoom = corGeneral[14:16, ]
+corrplot(corZoom, method = "number", number.cex= 15/ncol(corZoom), col = colors(100),
+         tl.col = "black", cl.pos = "n", addCoefasPercent = TRUE)
+```
+
+Da questo piccolo e apparentemente semplice grafico si possono ricavare una discreta quantità di informazioni utili. In generale, i due fattori che più hanno inciso su ciascuna delle variabili sono l'età media (espressa in particolare dalla percentuale di over 65 e over 70) e l'indice di sviluppo umano.\
+Tuttavia, così come per l'analisi fatta sugli outlier, sembra che anche questa volta sia opportuno separare le considerazioni sui nuovi casi e sulle nuove morti da quelle sulle nuove vaccinazioni.
+
+Sia per la manifestazione dei nuovi contagiati che per i successivi decessi infatti si può vedere come i paesi colpiti più duramente siano quelli con elevate percentuali di persone anziane. Non a caso quindi i vari paesi del mondo hanno caratterizzato tale fascia demografica come a "rischio elevato".\
+In secondo luogo, sempre per queste due variabili, si possono vedere due correlazioni "ovvie": il numero di morti è fortemente correlato a quello di contagi in quanto, ovviamente, per morire di COVID-19 bisogna necessariamente contrarlo; la discreta correlazione tra l'indice di sviluppo umano e queste due variabili, la quale è ovviamente collegata alla prima osservazione fatta, in quanto maggiore è lo sviluppo di un paese, maggiore è l'aspettativa di vita e quindi anche il numero di persione anziane (quest'ultima osservazione è facilmente confermata dal grafico delle correlazioni generali).
+
+Per quanto riguarda le vaccinazioni, il grafico mostra che non sono stati i paesi maggiormente colpiti dalla pandemia ad essere i primi beneficiarne, ma bensì i paesi più ricchi (quindi quelli un reddito pro capite più elevato) che avevano un maggiore potere economico per acquistarli. Questa considerazione sembra anche essere confermata dal fatto che c'è una relatviamente buona correlazione negativa tra la percentuale delle persone in estrema povertà in un paese ed il numero di vaccini inoculati nello stesso.\
+Come già detto sopra, la longevità delle persone in una nazione è legata fortemente alla ricchezza della stessa e quindi comunque le categorie definite a rischio sono state protette. Si vuole ad ogni modo sottolineare che il numero di persone in queste fasce demografiche è più fortemente connesso al numero di contagiati di quanto lo sia al numero di vaccinazioni.
+
+## 3: L'uscita dall'inferno
+
+Vedendo i risultati emersi, soprattutto per quanto riguarda le vaccinazioni, è più che ragionevole chiedersi se l'umanità, nella sua totalità, sia riuscita a "tenere il passo" con il virus e se è lecito sperare in un ritorno alla normalità.
+
+### 3.1: La chiamata alle armi
+
+Per rispondere alla prima domanda, si possono confrontare gli andamenti dei nuovi casi e delle vaccinazioni per capire quali differenze ci sono tra la velocità di contagio e di vaccinazione.
+
+```{r il confronto}
+covidFull %>%
+  select(c("date", "new_cases", "new_vaccinations")) %>%
+  group_by(date) %>%
+  summarise_at(c("new_cases", "new_vaccinations"), sum) %>%
+  filter(new_vaccinations >= 1) %>%
+  ggplot(aes(x = date)) +
+    geom_line(aes(y = new_cases, color = "#6E1B09"), alpha = 1/5) +
+    geom_smooth(aes(y = new_cases, color = "#6E1B09"), se = FALSE) +
+    geom_line(aes(y = new_vaccinations, color = "#F07249"), alpha = 1/5) +
+    geom_smooth(aes(y = new_vaccinations, color = "#F07249"), se = FALSE) +
+    # Cosmesi
+    theme_classic() +
+    labs(title = "Nuovi casi vs. nuove vaccinazioni",
+         x = "Data", y = "Persone (%)") +
+    scale_color_identity( name = "",
+                          breaks = c("#F07249", "#6E1B09"),
+                          labels = c("Nuove vaccinazioni", "Nuovi casi"),
+                          guide = "legend")
+```
+
+È evidente quindi che il ritmo di vaccinazione, a livello mondiale, è di gran lunga superiore a quello dei nuovi contagi e sembra essere portato ad aumentare ancora di più.
+
+Ciò che inoltre può essere interessante è vedere in quale giorno le nuove vaccinazioni hanno superato il numero di nuovi casi.
+
+```{r il giorno del sorpasso}
+covidFull %>%
+  select(c("date", "new_cases", "new_vaccinations")) %>%
+  group_by(date) %>%
+  summarise_at(c("new_cases", "new_vaccinations"), sum) %>%
+  filter(new_vaccinations > new_cases) %>%
+  select(date) %>%
+  arrange(date) %>%
+  head(1)
+```
+
+Considerando che la campagna vaccinale, a livello mondiale, è iniziata all'incirca a metà dicembre 2020, è veramente notevole constatare che, in termini di velocità, l'umanità sia stata in grado di "sorpassare" la pandemia in così poco tempo.
+
+### 3.2: La luce in fondo al tunnel
+
+Vedendo quindi quanto rapida è stata la risposta dell'umanità, dal punto di vista della somministrazione dei vaccini, può essere utile anche capire a che punto è la campagna vaccinale a livello globale e se quindi è plausibile una sorta di ritorno alla normalità in tempi brevi.
+
+Per far questo si è deciso di confrontare il numero di persone immuni al virus (in quanto completamente vaccinate) con quello dei casi totali da inizio pandemia e vedere se anche il totale di immuni supera il totale dei contagiati.
+
+```{r uscendo dalla pandemia}
+covidFull %>%
+  select(c("date", "total_cases", "people_fully_vaccinated")) %>%
+  group_by(date) %>%
+  summarise_at(c("total_cases", "people_fully_vaccinated"), sum) %>%
+  filter(people_fully_vaccinated >= 1) %>%
+  ggplot(aes(x = date)) +
+    geom_line(aes(y = total_cases, color = "#6E1B09"), alpha = 1/5) +
+    geom_smooth(aes(y = total_cases, color = "#6E1B09"), se = FALSE) +
+    geom_line(aes(y = people_fully_vaccinated, color = "#F07249"), alpha = 1/5) +
+    geom_smooth(aes(y = people_fully_vaccinated, color = "#F07249"), se = FALSE) +
+    # Cosmesi
+    theme_classic() +
+    labs(title = "Nuovi casi vs. vaccinati pienamente",
+         x = "Data", y = "Persone (%)") +
+    scale_color_identity( name = "",
+                          breaks = c("#F07249", "#6E1B09"),
+                          labels = c("Vaccinati pienamente", "Casi totali"),
+                          guide = "legend")
+```
+
+Anche questo grafico porta informazioni molto positive: il numero totale di vaccinati ha superato il numero totale di contagiati da inizio pandemia. Questo numero è destinato a crescere in quanto i leader di tutto il mondo condividono il principio che
+
+> "Nessuno è veramente al sicuro fino a quando non lo sono tutti."
+>
+> `r tufte::quote_footer('Amina Mohammed, Vice Segretario-Generale delle Nazioni Unite')`
+
+Anche in questo caso è utile sapere il giorno in cui c'è stato questo sorpasso positivo.
+
+```{r la svolta decisiva}
+covidFull %>%
+  select(c("date", "total_cases", "people_fully_vaccinated")) %>%
+  group_by(date) %>%
+  summarise_at(c("total_cases", "people_fully_vaccinated"), sum) %>%
+  filter(people_fully_vaccinated > total_cases) %>%
+  select(date) %>%
+  arrange(date) %>%
+  head(1)
+```
+
+Analogamente a quanto detto sopra, ci troviamo anche qui di fronte ad un risultato sbalorditivo: l'umanità con le sue forze è riuscita, in circa quattro mesi, a raggiungere tante persone quanto COVID-19 è riuscito a raggiungerne in un anno.
+
+Nonostante quindi le disuguaglianze già sottolineate nella distribuzione dei vaccini, è chiaro che il genere umano, in generale, stia facendo un buon lavoro nell'immunizzazione della sua specie. È quindi totalmente ragionevole pensare che entro il 2022 si possa tornare alla cosiddetta "normalità pre-COVID".
+
+Sono sempre meno i giorni che quindi ci separano dal momento in cui usciremo dall'inferno causato dalla pandemia ed in cui si potrà finalmente dire:
+
+> "E quindi uscimmo a riveder le stelle."
+>
+> `r tufte::quote_footer('Dante Alighieri, Inferno XXXIV, v. 139')`
