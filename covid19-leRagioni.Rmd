@@ -469,7 +469,7 @@ covidFull %>%
     geom_smooth(aes(y = people_fully_vaccinated, color = "#F07249"), se = FALSE) +
     # Cosmesi
     theme_classic() +
-    labs(title = "Nuovi casi vs. vaccinati pienamente",
+    labs(title = "Casi totali vs. vaccinati pienamente",
          x = "Data", y = "Persone (%)") +
     scale_color_identity( name = "",
                           breaks = c("#F07249", "#6E1B09"),
