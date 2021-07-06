@@ -315,14 +315,6 @@ relevantVars = c("new_cases", "new_deaths", "new_vaccinations", "continent", "co
                  "containment_index")
 ```
 
-```{r traduzione per cosmetica, echo = FALSE}
-translate = c("nuovi casi", "nuove morti", "nuove vaccinazioni", "continente", "paese", "popolazione", 
-              "densità abitativa", "età media", "over 65", "over 70", "PIL p.c.", "povertà estrema",
-              "tasso morti cardiovascolari", "prevalenza diabete", "fumatrici", "fumatori", "posti letto",
-              "aspettativa di vita", "indice sviluppo umano", "indice contenimento")
-```
-
-
 Per maggiori dettagli sul significato e/o su come sono state misurati questi dati si consiglia di consultare la [sezione dedicata](https://github.com/owid/covid-19-data/blob/master/public/data/owid-covid-codebook.csv) della repository di GitHub creata da Our World in Data. I dettagli sull'indice di contenimento possono essere trovati direttamente nell'[apposita sezione](https://ourworldindata.org/covid-stringency-index) del sito web della medesima organizzazione.
 
 ### 2.2: Cercando correlazoni
